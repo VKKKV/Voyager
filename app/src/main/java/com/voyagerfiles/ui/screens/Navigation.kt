@@ -2,12 +2,12 @@ package com.voyagerfiles.ui.screens
 
 import androidx.compose.runtime.Composable
 import androidx.navigation.NavType
+import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.voyagerfiles.viewmodel.FileBrowserViewModel
-import java.net.URLDecoder
 import java.net.URLEncoder
 
 sealed class Screen(val route: String) {
@@ -29,7 +29,11 @@ fun AppNavigation(viewModel: FileBrowserViewModel) {
             HomeScreen(
                 viewModel = viewModel,
                 onNavigateToBrowser = { path ->
-                    viewModel.navigateTo(path)
+                    viewModel.openLocalRoot(path)
+                    navController.navigate(Screen.Browser.createRoute(path))
+                },
+                onNavigateToSession = { sessionId, path ->
+                    viewModel.activateSession(sessionId)
                     navController.navigate(Screen.Browser.createRoute(path))
                 },
                 onNavigateToConnections = {
@@ -44,14 +48,10 @@ fun AppNavigation(viewModel: FileBrowserViewModel) {
         composable(
             route = Screen.Browser.route,
             arguments = listOf(navArgument("path") { type = NavType.StringType }),
-        ) { backStackEntry ->
-            val path = URLDecoder.decode(
-                backStackEntry.arguments?.getString("path") ?: "/storage/emulated/0",
-                "UTF-8",
-            )
+        ) {
             BrowserScreen(
                 viewModel = viewModel,
-                onNavigateBack = { navController.popBackStack() },
+                onNavigateBack = { navController.navigateHome() },
             )
         }
 
@@ -73,5 +73,14 @@ fun AppNavigation(viewModel: FileBrowserViewModel) {
                 onNavigateBack = { navController.popBackStack() },
             )
         }
+    }
+}
+
+private fun NavHostController.navigateHome() {
+    navigate(Screen.Home.route) {
+        popUpTo(Screen.Home.route) {
+            inclusive = false
+        }
+        launchSingleTop = true
     }
 }

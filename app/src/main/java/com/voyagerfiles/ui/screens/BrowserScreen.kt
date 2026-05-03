@@ -4,6 +4,7 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -27,13 +28,16 @@ import androidx.compose.material.icons.automirrored.filled.Sort
 import androidx.compose.material.icons.automirrored.filled.ViewList
 import androidx.compose.material.icons.filled.BookmarkAdd
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Cloud
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.ContentCut
 import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.CreateNewFolder
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.DriveFileRenameOutline
 import androidx.compose.material.icons.filled.ErrorOutline
+import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.MoreVert
@@ -48,6 +52,7 @@ import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -66,6 +71,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.voyagerfiles.data.model.FileSource
 import com.voyagerfiles.data.model.SortBy
@@ -78,6 +84,7 @@ import com.voyagerfiles.ui.components.FileListItem
 import com.voyagerfiles.ui.components.PathBreadcrumb
 import com.voyagerfiles.ui.components.RenameDialog
 import com.voyagerfiles.util.FileUtils
+import com.voyagerfiles.viewmodel.BrowserSession
 import com.voyagerfiles.viewmodel.ClipboardOperation
 import com.voyagerfiles.viewmodel.FileBrowserViewModel
 import kotlinx.coroutines.launch
@@ -89,6 +96,8 @@ fun BrowserScreen(
     onNavigateBack: () -> Unit,
 ) {
     val state by viewModel.browseState.collectAsState()
+    val sessions by viewModel.sessions.collectAsState()
+    val activeSession by viewModel.activeSession.collectAsState()
     val clipboardPaths by viewModel.clipboardPaths.collectAsState()
     val clipboardOp by viewModel.clipboardOperation.collectAsState()
     val snackbarMessage by viewModel.snackbarMessage.collectAsState()
@@ -103,8 +112,23 @@ fun BrowserScreen(
     var showSortMenu by remember { mutableStateOf(false) }
     var showMoreMenu by remember { mutableStateOf(false) }
     var showCreateMenu by remember { mutableStateOf(false) }
+    var showSessionsSheet by remember { mutableStateOf(false) }
 
     val isSelectionMode = state.selectedFiles.isNotEmpty()
+    val isRemote = state.source != FileSource.LOCAL
+
+    fun leaveBrowser() {
+        onNavigateBack()
+    }
+
+    fun closeSession(sessionId: String) {
+        val closesOnlyActiveSession = sessionId == activeSession?.id && sessions.size <= 1
+        viewModel.closeSession(sessionId)
+        if (closesOnlyActiveSession) {
+            showSessionsSheet = false
+            onNavigateBack()
+        }
+    }
 
     // Show snackbar messages from ViewModel
     LaunchedEffect(snackbarMessage) {
@@ -118,7 +142,7 @@ fun BrowserScreen(
     BackHandler {
         when {
             isSelectionMode -> viewModel.clearSelection()
-            !viewModel.navigateUp() -> onNavigateBack()
+            !viewModel.navigateUp() -> leaveBrowser()
         }
     }
 
@@ -136,6 +160,11 @@ fun BrowserScreen(
                     actions = {
                         IconButton(onClick = { viewModel.selectAll() }) {
                             Icon(Icons.Filled.SelectAll, "Select all")
+                        }
+                        if (isRemote) {
+                            IconButton(onClick = { viewModel.downloadSelected() }) {
+                                Icon(Icons.Filled.Download, "Download")
+                            }
                         }
                         IconButton(onClick = { viewModel.copyToClipboard(state.selectedFiles.toList()) }) {
                             Icon(Icons.Filled.ContentCopy, "Copy")
@@ -168,17 +197,21 @@ fun BrowserScreen(
                     },
                     navigationIcon = {
                         IconButton(onClick = {
-                            if (!viewModel.navigateUp()) onNavigateBack()
+                            if (!viewModel.navigateUp()) leaveBrowser()
                         }) {
                             Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back")
                         }
                     },
                     actions = {
+                        IconButton(onClick = { showSessionsSheet = true }) {
+                            Icon(Icons.Filled.Folder, "Sessions")
+                        }
                         // Show disconnect button for remote connections
                         if (state.source != FileSource.LOCAL) {
                             TextButton(onClick = {
+                                val closesOnlyActiveSession = sessions.size <= 1
                                 viewModel.disconnectRemote()
-                                onNavigateBack()
+                                if (closesOnlyActiveSession) onNavigateBack()
                             }) {
                                 Text("Disconnect", color = MaterialTheme.colorScheme.error)
                             }
@@ -304,32 +337,34 @@ fun BrowserScreen(
         floatingActionButton = {
             if (!isSelectionMode) {
                 Box {
-                    FloatingActionButton(
-                        onClick = { showCreateMenu = true },
-                        containerColor = MaterialTheme.colorScheme.primaryContainer,
-                    ) {
-                        Icon(Icons.Filled.CreateNewFolder, "Create")
-                    }
-                    DropdownMenu(
-                        expanded = showCreateMenu,
-                        onDismissRequest = { showCreateMenu = false },
-                    ) {
-                        DropdownMenuItem(
-                            text = { Text("New Folder") },
-                            leadingIcon = { Icon(Icons.Filled.CreateNewFolder, null) },
-                            onClick = {
-                                showCreateMenu = false
-                                showCreateFolderDialog = true
-                            },
-                        )
-                        DropdownMenuItem(
-                            text = { Text("New File") },
-                            leadingIcon = { Icon(Icons.AutoMirrored.Filled.NoteAdd, null) },
-                            onClick = {
-                                showCreateMenu = false
-                                showCreateFileDialog = true
-                            },
-                        )
+                    if (!isRemote) {
+                        FloatingActionButton(
+                            onClick = { showCreateMenu = true },
+                            containerColor = MaterialTheme.colorScheme.primaryContainer,
+                        ) {
+                            Icon(Icons.Filled.CreateNewFolder, "Create")
+                        }
+                        DropdownMenu(
+                            expanded = showCreateMenu,
+                            onDismissRequest = { showCreateMenu = false },
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text("New Folder") },
+                                leadingIcon = { Icon(Icons.Filled.CreateNewFolder, null) },
+                                onClick = {
+                                    showCreateMenu = false
+                                    showCreateFolderDialog = true
+                                },
+                            )
+                            DropdownMenuItem(
+                                text = { Text("New File") },
+                                leadingIcon = { Icon(Icons.AutoMirrored.Filled.NoteAdd, null) },
+                                onClick = {
+                                    showCreateMenu = false
+                                    showCreateFileDialog = true
+                                },
+                            )
+                        }
                     }
                 }
             }
@@ -421,6 +456,8 @@ fun BrowserScreen(
                                         viewModel.toggleSelection(file.path)
                                     } else if (file.isDirectory) {
                                         viewModel.navigateTo(file.path)
+                                    } else if (isRemote) {
+                                        viewModel.downloadFile(file.path)
                                     } else if (state.source == FileSource.LOCAL) {
                                         try {
                                             FileUtils.openFile(context, file)
@@ -459,6 +496,8 @@ fun BrowserScreen(
                                         viewModel.toggleSelection(file.path)
                                     } else if (file.isDirectory) {
                                         viewModel.navigateTo(file.path)
+                                    } else if (isRemote) {
+                                        viewModel.downloadFile(file.path)
                                     } else if (state.source == FileSource.LOCAL) {
                                         try {
                                             FileUtils.openFile(context, file)
@@ -480,6 +519,19 @@ fun BrowserScreen(
                 }
             }
         }
+    }
+
+    if (showSessionsSheet) {
+        SessionSwitcherSheet(
+            sessions = sessions,
+            activeSessionId = activeSession?.id,
+            onSelect = { sessionId ->
+                viewModel.activateSession(sessionId)
+                showSessionsSheet = false
+            },
+            onClose = { sessionId -> closeSession(sessionId) },
+            onDismiss = { showSessionsSheet = false },
+        )
     }
 
     // Dialogs
@@ -527,5 +579,100 @@ fun BrowserScreen(
                 viewModel.clearSelection()
             },
         )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SessionSwitcherSheet(
+    sessions: List<BrowserSession>,
+    activeSessionId: String?,
+    onSelect: (String) -> Unit,
+    onClose: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(bottom = 24.dp),
+        ) {
+            Text(
+                "Sessions",
+                style = MaterialTheme.typography.titleLarge,
+                modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp),
+            )
+            if (sessions.isEmpty()) {
+                Text(
+                    "No active sessions",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 24.dp, vertical = 16.dp),
+                )
+            } else {
+                sessions.forEach { session ->
+                    SessionRow(
+                        session = session,
+                        isActive = session.id == activeSessionId,
+                        onSelect = { onSelect(session.id) },
+                        onClose = { onClose(session.id) },
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SessionRow(
+    session: BrowserSession,
+    isActive: Boolean,
+    onSelect: () -> Unit,
+    onClose: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onSelect)
+            .padding(horizontal = 24.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            imageVector = if (session.source == FileSource.LOCAL) Icons.Filled.Folder else Icons.Filled.Cloud,
+            contentDescription = null,
+            modifier = Modifier.size(28.dp),
+            tint = if (isActive) MaterialTheme.colorScheme.primary
+            else MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(modifier = Modifier.size(16.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    session.title,
+                    style = MaterialTheme.typography.titleMedium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false),
+                )
+                if (isActive) {
+                    Spacer(modifier = Modifier.size(8.dp))
+                    Text(
+                        "Active",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                }
+            }
+            Text(
+                session.description,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        IconButton(onClick = onClose) {
+            Icon(Icons.Filled.Close, "Close session")
+        }
     }
 }

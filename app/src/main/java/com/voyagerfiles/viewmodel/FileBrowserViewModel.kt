@@ -1,18 +1,21 @@
 package com.voyagerfiles.viewmodel
 
 import android.app.Application
+import android.os.Environment
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.voyagerfiles.data.local.AppDatabase
 import com.voyagerfiles.data.local.PreferencesManager
 import com.voyagerfiles.data.model.Bookmark
 import com.voyagerfiles.data.model.BrowseState
+import com.voyagerfiles.data.model.ConnectionProtocol
 import com.voyagerfiles.data.model.FileItem
 import com.voyagerfiles.data.model.FileSource
 import com.voyagerfiles.data.model.RemoteConnection
 import com.voyagerfiles.data.model.SortBy
 import com.voyagerfiles.data.model.SortOrder
 import com.voyagerfiles.data.model.ViewMode
+import com.voyagerfiles.data.repository.FileDownloader
 import com.voyagerfiles.data.repository.FileProvider
 import com.voyagerfiles.data.repository.FileProviderFactory
 import com.voyagerfiles.ui.theme.AppTheme
@@ -33,9 +36,17 @@ class FileBrowserViewModel(application: Application) : AndroidViewModel(applicat
     private val bookmarkDao = db.bookmarkDao()
 
     private var fileProvider: FileProvider = FileProviderFactory.createLocal()
+    private var browserSessionRootPath: String? = null
+    private val sessionProviders = mutableMapOf<String, FileProvider>()
 
     private val _browseState = MutableStateFlow(BrowseState())
     val browseState: StateFlow<BrowseState> = _browseState.asStateFlow()
+
+    private val _sessions = MutableStateFlow<List<BrowserSession>>(emptyList())
+    val sessions: StateFlow<List<BrowserSession>> = _sessions.asStateFlow()
+
+    private val _activeSession = MutableStateFlow<BrowserSession?>(null)
+    val activeSession: StateFlow<BrowserSession?> = _activeSession.asStateFlow()
 
     private val _clipboardPaths = MutableStateFlow<List<String>>(emptyList())
     val clipboardPaths: StateFlow<List<String>> = _clipboardPaths.asStateFlow()
@@ -77,24 +88,73 @@ class FileBrowserViewModel(application: Application) : AndroidViewModel(applicat
         // Load initial path
         viewModelScope.launch {
             val defaultPath = prefs.defaultPath.first()
-            navigateTo(defaultPath)
+            navigateToPath(defaultPath)
         }
     }
 
     fun navigateTo(path: String) {
         viewModelScope.launch {
-            _browseState.update { it.copy(currentPath = path, isLoading = true, error = null, selectedFiles = emptySet()) }
-            loadFiles(path)
+            val normalizedPath = BrowserNavigationBounds.normalizePath(path)
+            val rootPath = browserSessionRootPath
+            if (rootPath != null && !BrowserNavigationBounds.isPathAtOrInsideRoot(normalizedPath, rootPath)) {
+                showSnackbar("This location is outside the current session")
+                return@launch
+            }
+            navigateToPath(normalizedPath)
+        }
+    }
+
+    fun openLocalRoot(path: String) {
+        viewModelScope.launch {
+            val normalizedPath = BrowserNavigationBounds.normalizePath(path)
+            val sessionId = localSessionId(normalizedPath)
+            if (_sessions.value.none { it.id == sessionId }) {
+                sessionProviders[sessionId] = FileProviderFactory.createLocal()
+                _sessions.update { sessions ->
+                    sessions + BrowserSession(
+                        id = sessionId,
+                        title = titleForLocalPath(normalizedPath),
+                        source = FileSource.LOCAL,
+                        rootPath = normalizedPath,
+                        currentPath = normalizedPath,
+                    )
+                }
+            } else {
+                _sessions.update { sessions ->
+                    sessions.map { session ->
+                        if (session.id == sessionId) session.copy(currentPath = normalizedPath) else session
+                    }
+                }
+            }
+            activateSessionInternal(sessionId)
         }
     }
 
     fun navigateUp(): Boolean {
-        val parent = fileProvider.getParentPath(_browseState.value.currentPath)
-        if (parent != null) {
-            navigateTo(parent)
+        val currentPath = BrowserNavigationBounds.normalizePath(_browseState.value.currentPath)
+        val parent = fileProvider.getParentPath(currentPath)
+        if (BrowserNavigationBounds.canNavigateToParent(currentPath, parent, browserSessionRootPath)) {
+            navigateTo(checkNotNull(parent))
             return true
         }
         return false
+    }
+
+    private suspend fun navigateToPath(path: String) {
+        val normalizedPath = BrowserNavigationBounds.normalizePath(path)
+        val sessionId = _activeSession.value?.id
+        if (sessionId != null) {
+            updateSession(sessionId) { it.copy(currentPath = normalizedPath) }
+        }
+        _browseState.update {
+            it.copy(
+                currentPath = normalizedPath,
+                isLoading = true,
+                error = null,
+                selectedFiles = emptySet(),
+            )
+        }
+        loadFiles(normalizedPath, sessionId, fileProvider)
     }
 
     fun refresh() {
@@ -103,20 +163,26 @@ class FileBrowserViewModel(application: Application) : AndroidViewModel(applicat
 
     private fun refreshFiles() {
         viewModelScope.launch {
-            loadFiles(_browseState.value.currentPath)
+            loadFiles(_browseState.value.currentPath, _activeSession.value?.id, fileProvider)
         }
     }
 
-    private suspend fun loadFiles(path: String) {
+    private suspend fun loadFiles(
+        path: String,
+        sessionId: String? = _activeSession.value?.id,
+        provider: FileProvider = fileProvider,
+    ) {
         _browseState.update { it.copy(isLoading = true, error = null) }
-        fileProvider.listFiles(path).fold(
+        provider.listFiles(path).fold(
             onSuccess = { files ->
+                if (!isCurrentLoad(sessionId)) return@fold
                 val filtered = if (_browseState.value.showHidden) files
                 else files.filter { !it.isHidden }
                 val sorted = sortFiles(filtered)
                 _browseState.update { it.copy(files = sorted, isLoading = false) }
             },
             onFailure = { error ->
+                if (!isCurrentLoad(sessionId)) return@fold
                 _browseState.update {
                     it.copy(
                         error = error.message ?: "Failed to list files",
@@ -261,30 +327,98 @@ class FileBrowserViewModel(application: Application) : AndroidViewModel(applicat
         }
     }
 
+    fun downloadFile(path: String) {
+        downloadPaths(listOf(path), clearSelection = false)
+    }
+
+    fun downloadSelected() {
+        downloadPaths(_browseState.value.selectedFiles.toList(), clearSelection = true)
+    }
+
+    private fun downloadPaths(paths: List<String>, clearSelection: Boolean) {
+        viewModelScope.launch {
+            val state = _browseState.value
+            if (paths.isEmpty()) return@launch
+            if (state.source == FileSource.LOCAL) {
+                showSnackbar("This file is already on this device")
+                return@launch
+            }
+
+            val provider = fileProvider
+            val items = runCatching {
+                paths.map { path ->
+                    state.files.firstOrNull { it.path == path }
+                        ?: provider.getFileInfo(path).getOrThrow()
+                }
+            }.getOrElse { error ->
+                showSnackbar("Download failed: ${error.message}")
+                return@launch
+            }
+            if (items.any { it.path == state.currentPath }) {
+                showSnackbar("Choose files or folders inside this location")
+                return@launch
+            }
+
+            if (clearSelection) clearSelection()
+            showSnackbar("Downloading ${items.size} item${if (items.size == 1) "" else "s"}...")
+
+            val downloads = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+            FileDownloader.download(provider, items, downloads).fold(
+                onSuccess = { result ->
+                    val count = result.downloadedFiles + result.downloadedDirectories
+                    showSnackbar(
+                        "Downloaded $count item${if (count == 1) "" else "s"} to Downloads"
+                    )
+                },
+                onFailure = { error ->
+                    showSnackbar("Download failed: ${error.message}")
+                },
+            )
+        }
+    }
+
     // Connection management
     fun connectToRemote(connection: RemoteConnection) {
         viewModelScope.launch {
-            fileProvider.disconnect()
-            fileProvider = FileProviderFactory.createRemote(connection)
-            val source = when (connection.protocol) {
-                com.voyagerfiles.data.model.ConnectionProtocol.SFTP -> FileSource.SFTP
-                com.voyagerfiles.data.model.ConnectionProtocol.FTP -> FileSource.FTP
-                com.voyagerfiles.data.model.ConnectionProtocol.SMB -> FileSource.SMB
-                com.voyagerfiles.data.model.ConnectionProtocol.WEBDAV -> FileSource.WEBDAV
+            val sessionId = remoteSessionId(connection.id)
+            if (_sessions.value.none { it.id == sessionId }) {
+                val normalizedPath = BrowserNavigationBounds.normalizePath(connection.remotePath)
+                val source = sourceForProtocol(connection.protocol)
+                sessionProviders[sessionId] = FileProviderFactory.createRemote(connection)
+                _sessions.update { sessions ->
+                    sessions + BrowserSession(
+                        id = sessionId,
+                        title = connection.name,
+                        source = source,
+                        rootPath = normalizedPath,
+                        currentPath = normalizedPath,
+                        connectionId = connection.id,
+                        host = connection.host,
+                    )
+                }
             }
-            _browseState.update { it.copy(source = source) }
             connectionDao.updateLastConnected(connection.id, System.currentTimeMillis())
-            navigateTo(connection.remotePath)
+            activateSessionInternal(sessionId)
         }
     }
 
     fun disconnectRemote() {
+        closeActiveSession()
+    }
+
+    fun activateSession(sessionId: String) {
         viewModelScope.launch {
-            fileProvider.disconnect()
-            fileProvider = FileProviderFactory.createLocal()
-            _browseState.update { it.copy(source = FileSource.LOCAL) }
-            val path = prefs.defaultPath.first()
-            navigateTo(path)
+            activateSessionInternal(sessionId)
+        }
+    }
+
+    fun closeActiveSession() {
+        _activeSession.value?.let { closeSession(it.id) }
+    }
+
+    fun closeSession(sessionId: String) {
+        viewModelScope.launch {
+            closeSessionInternal(sessionId)
         }
     }
 
@@ -355,7 +489,94 @@ class FileBrowserViewModel(application: Application) : AndroidViewModel(applicat
 
     override fun onCleared() {
         super.onCleared()
-        viewModelScope.launch { fileProvider.disconnect() }
+        viewModelScope.launch {
+            sessionProviders.values.forEach { it.disconnect() }
+            if (sessionProviders.isEmpty()) fileProvider.disconnect()
+        }
+    }
+
+    private suspend fun activateSessionInternal(sessionId: String): Boolean {
+        val session = _sessions.value.firstOrNull { it.id == sessionId } ?: return false
+        val provider = sessionProviders[sessionId] ?: return false
+        fileProvider = provider
+        browserSessionRootPath = session.rootPath
+        _activeSession.value = session
+        _browseState.update {
+            it.copy(
+                currentPath = session.currentPath,
+                source = session.source,
+                selectedFiles = emptySet(),
+                error = null,
+            )
+        }
+        loadFiles(session.currentPath, session.id, provider)
+        return true
+    }
+
+    private suspend fun closeSessionInternal(sessionId: String) {
+        val closedSession = _sessions.value.firstOrNull { it.id == sessionId } ?: return
+        sessionProviders.remove(sessionId)?.disconnect()
+        val wasActive = _activeSession.value?.id == sessionId
+        val remainingSessions = _sessions.value.filterNot { it.id == sessionId }
+        _sessions.value = remainingSessions
+
+        if (!wasActive) {
+            refreshActiveSessionSnapshot()
+            return
+        }
+
+        val nextSession = remainingSessions.lastOrNull()
+        if (nextSession != null) {
+            activateSessionInternal(nextSession.id)
+            return
+        }
+
+        fileProvider = FileProviderFactory.createLocal()
+        browserSessionRootPath = null
+        _activeSession.value = null
+        _browseState.update {
+            it.copy(
+                currentPath = closedSession.rootPath,
+                files = emptyList(),
+                isLoading = false,
+                error = null,
+                selectedFiles = emptySet(),
+                source = FileSource.LOCAL,
+            )
+        }
+    }
+
+    private fun updateSession(sessionId: String, transform: (BrowserSession) -> BrowserSession) {
+        _sessions.update { sessions ->
+            sessions.map { session ->
+                if (session.id == sessionId) transform(session) else session
+            }
+        }
+        refreshActiveSessionSnapshot()
+    }
+
+    private fun refreshActiveSessionSnapshot() {
+        val activeId = _activeSession.value?.id ?: return
+        _activeSession.value = _sessions.value.firstOrNull { it.id == activeId }
+    }
+
+    private fun isCurrentLoad(sessionId: String?): Boolean =
+        sessionId == _activeSession.value?.id
+
+    private fun localSessionId(rootPath: String): String =
+        "local:${BrowserNavigationBounds.normalizePath(rootPath)}"
+
+    private fun remoteSessionId(connectionId: Long): String =
+        "remote:$connectionId"
+
+    private fun titleForLocalPath(path: String): String =
+        BrowserNavigationBounds.normalizePath(path).substringAfterLast("/").ifEmpty { "Local Files" }
+
+    private fun sourceForProtocol(protocol: ConnectionProtocol): FileSource = when (protocol) {
+        ConnectionProtocol.SFTP -> FileSource.SFTP
+        ConnectionProtocol.FTP -> FileSource.FTP
+        ConnectionProtocol.SMB -> FileSource.SMB
+        ConnectionProtocol.WEBDAV -> FileSource.WEBDAV
     }
 }
 

@@ -2,6 +2,7 @@ package com.voyagerfiles.data.remote.sftp
 
 import com.voyagerfiles.data.model.ConnectionProtocol
 import com.voyagerfiles.data.model.RemoteConnection
+import com.voyagerfiles.data.repository.FileDownloader
 import kotlinx.coroutines.runBlocking
 import org.apache.sshd.common.file.virtualfs.VirtualFileSystemFactory
 import org.apache.sshd.common.keyprovider.KeyPairProvider
@@ -83,6 +84,36 @@ class SftpFileProviderTest {
         }
 
         assertEquals("downloaded", String(contents))
+    }
+
+    @Test
+    fun fileDownloaderSavesFileToLocalDirectory() = runBlocking {
+        val server = startServer(AuthMode.PASSWORD)
+        Files.write(server.root.resolve("remote.txt"), "local copy".toByteArray())
+        val provider = createProvider(server.port)
+        val destination = temp.newFolder("downloads").toPath()
+        val item = provider.listFiles("/").getOrThrow().single()
+
+        val result = FileDownloader.download(provider, listOf(item), destination.toFile()).getOrThrow()
+
+        assertEquals(1, result.downloadedFiles)
+        assertEquals("local copy", String(Files.readAllBytes(destination.resolve("remote.txt"))))
+    }
+
+    @Test
+    fun fileDownloaderSavesDirectoryRecursively() = runBlocking {
+        val server = startServer(AuthMode.PASSWORD)
+        Files.createDirectories(server.root.resolve("folder/nested"))
+        Files.write(server.root.resolve("folder/nested/file.txt"), "nested".toByteArray())
+        val provider = createProvider(server.port)
+        val destination = temp.newFolder("recursive-downloads").toPath()
+        val item = provider.listFiles("/").getOrThrow().single()
+
+        val result = FileDownloader.download(provider, listOf(item), destination.toFile()).getOrThrow()
+
+        assertEquals(1, result.downloadedFiles)
+        assertEquals(2, result.downloadedDirectories)
+        assertEquals("nested", String(Files.readAllBytes(destination.resolve("folder/nested/file.txt"))))
     }
 
     @Test

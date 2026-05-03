@@ -42,9 +42,12 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.voyagerfiles.data.model.FileItem
+import com.voyagerfiles.data.model.FileSource
 import com.voyagerfiles.util.FileUtils
+import com.voyagerfiles.viewmodel.BrowserSession
 import com.voyagerfiles.viewmodel.FileBrowserViewModel
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -52,10 +55,13 @@ import com.voyagerfiles.viewmodel.FileBrowserViewModel
 fun HomeScreen(
     viewModel: FileBrowserViewModel,
     onNavigateToBrowser: (String) -> Unit,
+    onNavigateToSession: (String, String) -> Unit,
     onNavigateToConnections: () -> Unit,
     onNavigateToSettings: () -> Unit,
 ) {
     val bookmarks by viewModel.bookmarks.collectAsState()
+    val sessions by viewModel.sessions.collectAsState()
+    val activeSession by viewModel.activeSession.collectAsState()
     val storageInfo = remember { FileUtils.getStorageInfo() }
     val directories = remember { FileUtils.getCommonDirectories() }
 
@@ -122,6 +128,24 @@ fun HomeScreen(
                             trackColor = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.2f),
                         )
                     }
+                }
+            }
+
+            if (sessions.isNotEmpty()) {
+                item {
+                    Text(
+                        "Active Sessions",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 8.dp),
+                    )
+                }
+                items(sessions, key = { it.id }) { session ->
+                    ActiveSessionRow(
+                        session = session,
+                        isActive = session.id == activeSession?.id,
+                        onClick = { onNavigateToSession(session.id, session.currentPath) },
+                    )
                 }
             }
 
@@ -269,6 +293,59 @@ fun HomeScreen(
             }
 
             item { Spacer(modifier = Modifier.height(16.dp)) }
+        }
+    }
+}
+
+@Composable
+private fun ActiveSessionRow(
+    session: BrowserSession,
+    isActive: Boolean,
+    onClick: () -> Unit,
+) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant,
+        ),
+    ) {
+        Row(
+            modifier = Modifier.padding(14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(
+                if (session.source == FileSource.LOCAL) Icons.Filled.Folder else Icons.Filled.Cloud,
+                contentDescription = null,
+                tint = if (isActive) MaterialTheme.colorScheme.primary
+                else MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(28.dp),
+            )
+            Spacer(modifier = Modifier.width(12.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    session.title,
+                    style = MaterialTheme.typography.titleMedium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    session.description,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            if (isActive) {
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    "Active",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            }
         }
     }
 }

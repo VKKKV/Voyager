@@ -6,8 +6,6 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -28,16 +26,22 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.ScrollableTabRow
 import androidx.compose.material3.Switch
+import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import com.voyagerfiles.BuildConfig
 import com.voyagerfiles.ui.theme.AppTheme
@@ -61,9 +65,8 @@ import com.voyagerfiles.ui.theme.SystemColors
 import com.voyagerfiles.ui.theme.TokyoNightColors
 import com.voyagerfiles.ui.theme.WhiteColors
 import com.voyagerfiles.viewmodel.FileBrowserViewModel
-import androidx.compose.ui.graphics.Color
 
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(
     viewModel: FileBrowserViewModel,
@@ -71,6 +74,8 @@ fun SettingsScreen(
 ) {
     val currentTheme by viewModel.theme.collectAsState()
     val browseState by viewModel.browseState.collectAsState()
+    var selectedThemeCategoryIndex by rememberSaveable { mutableIntStateOf(0) }
+    val selectedThemeCategory = themeCategories[selectedThemeCategoryIndex]
 
     Scaffold(
         topBar = {
@@ -94,7 +99,6 @@ fun SettingsScreen(
                 .verticalScroll(rememberScrollState())
                 .padding(16.dp),
         ) {
-            // Theme section
             Text(
                 "Theme",
                 style = MaterialTheme.typography.titleMedium,
@@ -102,12 +106,26 @@ fun SettingsScreen(
             )
             Spacer(modifier = Modifier.height(12.dp))
 
-            FlowRow(
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ScrollableTabRow(
+                selectedTabIndex = selectedThemeCategoryIndex,
+                edgePadding = 0.dp,
+            ) {
+                themeCategories.forEachIndexed { index, category ->
+                    Tab(
+                        selected = selectedThemeCategoryIndex == index,
+                        onClick = { selectedThemeCategoryIndex = index },
+                        text = { Text(category.label) },
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            Column(
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                AppTheme.entries.forEach { theme ->
-                    ThemeChip(
+                selectedThemeCategory.themes.forEach { theme ->
+                    ThemeOptionRow(
                         theme = theme,
                         isSelected = currentTheme == theme,
                         onClick = { viewModel.setTheme(theme) },
@@ -172,7 +190,7 @@ fun SettingsScreen(
 }
 
 @Composable
-private fun ThemeChip(
+private fun ThemeOptionRow(
     theme: AppTheme,
     isSelected: Boolean,
     onClick: () -> Unit,
@@ -181,12 +199,12 @@ private fun ThemeChip(
 
     Row(
         modifier = Modifier
-            .clip(RoundedCornerShape(12.dp))
+            .clip(RoundedCornerShape(8.dp))
             .then(
                 if (isSelected) Modifier.border(
                     2.dp,
                     MaterialTheme.colorScheme.primary,
-                    RoundedCornerShape(12.dp),
+                    RoundedCornerShape(8.dp),
                 ) else Modifier
             )
             .background(
@@ -194,39 +212,92 @@ private fun ThemeChip(
                 else MaterialTheme.colorScheme.surfaceVariant
             )
             .clickable(onClick = onClick)
-            .padding(horizontal = 12.dp, vertical = 8.dp),
+            .fillMaxWidth()
+            .padding(horizontal = 14.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        // Color preview dots
         Box(
             modifier = Modifier
-                .size(16.dp)
+                .size(18.dp)
                 .clip(CircleShape)
                 .background(colors.first),
         )
-        Spacer(modifier = Modifier.width(2.dp))
+        Spacer(modifier = Modifier.width(3.dp))
         Box(
             modifier = Modifier
-                .size(16.dp)
+                .size(18.dp)
                 .clip(CircleShape)
                 .background(colors.second),
         )
-        Spacer(modifier = Modifier.width(8.dp))
+        Spacer(modifier = Modifier.width(12.dp))
         Text(
             theme.displayName,
-            style = MaterialTheme.typography.labelMedium,
+            modifier = Modifier.weight(1f),
+            style = MaterialTheme.typography.bodyMedium,
         )
         if (isSelected) {
-            Spacer(modifier = Modifier.width(4.dp))
             Icon(
                 Icons.Filled.Check,
                 contentDescription = null,
-                modifier = Modifier.size(16.dp),
+                modifier = Modifier.size(18.dp),
                 tint = MaterialTheme.colorScheme.primary,
             )
         }
     }
 }
+
+private data class ThemeCategory(
+    val label: String,
+    val themes: List<AppTheme>,
+)
+
+private val themeCategories = listOf(
+    ThemeCategory(
+        label = "Base",
+        themes = listOf(
+            AppTheme.SYSTEM,
+            AppTheme.WHITE,
+            AppTheme.DARK,
+            AppTheme.BLACK,
+            AppTheme.HIGH_CONTRAST,
+            AppTheme.CUSTOM,
+        ),
+    ),
+    ThemeCategory(
+        label = "Color",
+        themes = listOf(
+            AppTheme.OCEAN,
+            AppTheme.PURPLE,
+            AppTheme.FOREST,
+        ),
+    ),
+    ThemeCategory(
+        label = "Catppuccin",
+        themes = listOf(
+            AppTheme.LATTE,
+            AppTheme.FRAPPE,
+            AppTheme.MACCHIATO,
+            AppTheme.MOCHA,
+        ),
+    ),
+    ThemeCategory(
+        label = "Classics",
+        themes = listOf(
+            AppTheme.NORD,
+            AppTheme.SOLARIZED_LIGHT,
+            AppTheme.SOLARIZED_DARK,
+            AppTheme.GRUVBOX_LIGHT,
+            AppTheme.GRUVBOX_DARK,
+        ),
+    ),
+    ThemeCategory(
+        label = "Night",
+        themes = listOf(
+            AppTheme.ROSE_PINE,
+            AppTheme.TOKYO_NIGHT,
+        ),
+    ),
+)
 
 private fun getThemePreviewColors(theme: AppTheme): Pair<Color, Color> = when (theme) {
     AppTheme.SYSTEM -> SystemColors.primary to SystemColors.background

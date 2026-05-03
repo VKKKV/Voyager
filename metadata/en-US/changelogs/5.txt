@@ -1,0 +1,6 @@
+Voyager 1.1.0:
+- Added local and remote browser sessions with session switching
+- Fixed folder Back navigation to return to Voyager Home at session roots
+- Added remote file and folder downloads
+- Reworked theme selection into grouped tabs with more options
+- Allowed user-configured HTTP WebDAV connections

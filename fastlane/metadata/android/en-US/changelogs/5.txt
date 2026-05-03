@@ -1,0 +1,6 @@
+Release 1.1.0:
+- Added browser sessions for local and remote locations, with an in-app session switcher and active sessions on Home
+- Fixed Back navigation so folder browsing returns to Voyager Home at the session root
+- Added remote download support for SFTP, FTP, and WebDAV files and folders
+- Reworked theme selection into grouped tabs and added additional theme options
+- Allowed cleartext HTTP WebDAV connections when the user configures an http:// endpoint

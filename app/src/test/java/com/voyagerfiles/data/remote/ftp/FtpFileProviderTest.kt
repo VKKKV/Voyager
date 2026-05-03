@@ -2,6 +2,7 @@ package com.voyagerfiles.data.remote.ftp
 
 import com.voyagerfiles.data.model.ConnectionProtocol
 import com.voyagerfiles.data.model.RemoteConnection
+import com.voyagerfiles.data.repository.FileDownloader
 import kotlinx.coroutines.runBlocking
 import org.apache.ftpserver.FtpServer
 import org.apache.ftpserver.FtpServerFactory
@@ -55,6 +56,20 @@ class FtpFileProviderTest {
 
         assertTrue(Files.exists(server.root.resolve("uploaded.txt")))
         assertEquals("uploaded", String(Files.readAllBytes(server.root.resolve("uploaded.txt"))))
+    }
+
+    @Test
+    fun fileDownloaderSavesFileToLocalDirectory() = runBlocking {
+        val server = startServer()
+        Files.write(server.root.resolve("remote.txt"), "ftp download".toByteArray())
+        val provider = createProvider(server.port)
+        val destination = temp.newFolder("downloads").toPath()
+        val item = provider.listFiles("/").getOrThrow().single()
+
+        val result = FileDownloader.download(provider, listOf(item), destination.toFile()).getOrThrow()
+
+        assertEquals(1, result.downloadedFiles)
+        assertEquals("ftp download", String(Files.readAllBytes(destination.resolve("remote.txt"))))
     }
 
     @Test
