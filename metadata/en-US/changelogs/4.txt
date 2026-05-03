@@ -1,0 +1,3 @@
+Voyager 1.0.3:
+- Fixed SFTP connection failures on Android caused by Apache SSHD client initialization
+- Switched runtime SFTP support to an Android-friendly client implementation

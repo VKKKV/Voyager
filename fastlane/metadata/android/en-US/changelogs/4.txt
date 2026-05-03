@@ -1,0 +1,4 @@
+Release 1.0.3:
+- Fixed Android SFTP startup failures caused by Apache SSHD client initialization
+- Replaced the runtime SFTP client with an Android-friendly JSch implementation
+- Kept SFTP password, keyboard-interactive, stream, and file operation regression coverage

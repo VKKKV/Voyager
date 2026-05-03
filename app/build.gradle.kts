@@ -28,8 +28,8 @@ android {
         applicationId = "com.voyagerfiles"
         minSdk = 26
         targetSdk = 35
-        versionCode = 3
-        versionName = "1.0.2"
+        versionCode = 4
+        versionName = "1.0.3"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -86,6 +86,10 @@ android {
         buildConfig = true
     }
 
+    lint {
+        checkTestSources = false
+    }
+
     packaging {
         resources {
             excludes += setOf(
@@ -133,9 +137,8 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
 
     // Network protocols - all FOSS-compatible
-    // SFTP/SSH - Apache SSHD (Apache 2.0)
-    implementation("org.apache.sshd:sshd-core:2.14.0")
-    implementation("org.apache.sshd:sshd-sftp:2.14.0")
+    // SFTP/SSH - JSch fork (BSD/ISC)
+    implementation("com.github.mwiede:jsch:2.28.2")
 
     // FTP - Apache Commons Net (Apache 2.0)
     implementation("commons-net:commons-net:3.11.1")
@@ -160,6 +163,8 @@ dependencies {
 
     // Testing
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.apache.sshd:sshd-core:2.14.0")
+    testImplementation("org.apache.sshd:sshd-sftp:2.14.0")
     testImplementation("org.apache.ftpserver:ftpserver-core:1.2.1")
     testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")

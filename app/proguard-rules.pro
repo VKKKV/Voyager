@@ -1,9 +1,8 @@
 # Keep network protocol classes
--keep class org.apache.sshd.** { *; }
+-keep class com.jcraft.jsch.** { *; }
 -keep class org.apache.commons.net.** { *; }
 -keep class com.hierynomus.** { *; }
 -keep class com.thegrizzlylabs.sardineandroid.** { *; }
--keep class net.schmizz.** { *; }
 -keep class org.bouncycastle.** { *; }
 -keep class org.slf4j.** { *; }
 -keep class com.github.thegrizzlylabs.** { *; }
@@ -20,13 +19,6 @@
 -keep class dcerpc.** { *; }
 -keep class net.engio.** { *; }
 
-# Apache SSHD service loader
--keep class org.apache.sshd.common.** { *; }
--keep class org.apache.sshd.client.** { *; }
--keepnames class * implements org.apache.sshd.common.NamedFactory
--keepnames class * implements org.apache.sshd.common.cipher.CipherFactory
--keepnames class * implements org.apache.sshd.common.kex.KeyExchangeFactory
-
 # Keep ServiceLoader implementations
 -keepnames class * implements java.security.Provider
 -keep class * extends java.security.Provider { *; }
@@ -41,9 +33,10 @@
 }
 
 # Don't warn about missing optional dependencies
--dontwarn org.apache.sshd.**
 -dontwarn org.bouncycastle.**
+-dontwarn org.apache.logging.log4j.**
 -dontwarn org.slf4j.**
+-dontwarn org.newsclub.net.unix.**
 -dontwarn javax.annotation.**
 -dontwarn org.ietf.jgss.**
 -dontwarn com.sun.**

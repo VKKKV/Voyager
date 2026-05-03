@@ -1,5 +1,10 @@
 package com.voyagerfiles.data.remote.sftp
 
+import com.jcraft.jsch.ChannelSftp
+import com.jcraft.jsch.JSch
+import com.jcraft.jsch.Session
+import com.jcraft.jsch.UIKeyboardInteractive
+import com.jcraft.jsch.UserInfo
 import com.voyagerfiles.data.model.FileItem
 import com.voyagerfiles.data.model.FileSource
 import com.voyagerfiles.data.model.RemoteConnection
@@ -8,106 +13,86 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import org.apache.sshd.client.SshClient
-import org.apache.sshd.client.auth.keyboard.UserAuthKeyboardInteractiveFactory
-import org.apache.sshd.client.auth.keyboard.UserInteraction
-import org.apache.sshd.client.auth.password.PasswordIdentityProvider
-import org.apache.sshd.client.auth.password.UserAuthPasswordFactory
-import org.apache.sshd.client.session.ClientSession
-import org.apache.sshd.common.keyprovider.KeyIdentityProvider
-import org.apache.sshd.sftp.client.SftpClient
-import org.apache.sshd.sftp.client.SftpClientFactory
+import java.io.FilterInputStream
+import java.io.FilterOutputStream
 import java.io.InputStream
 import java.io.OutputStream
 import java.util.Date
-import java.util.concurrent.TimeUnit
+import java.util.Properties
 
 class SftpFileProvider(private val connection: RemoteConnection) : FileProvider {
 
     private val connectionLock = Mutex()
-    private var sshClient: SshClient? = null
-    private var session: ClientSession? = null
-    private var sftpClient: SftpClient? = null
+    private var session: Session? = null
 
-    private suspend fun ensureConnected(): SftpClient = connectionLock.withLock {
-        val existing = sftpClient
-        if (existing != null && session?.isOpen == true) return@withLock existing
+    private fun ensureSessionLocked(): Session {
+        session?.takeIf { it.isConnected }?.let { return it }
 
         closeConnection()
 
-        var client: SshClient? = null
-        var sess: ClientSession? = null
-        var sftp: SftpClient? = null
+        val nextSession = JSch().getSession(
+            connection.username,
+            connection.host,
+            connection.port,
+        )
 
         try {
-            client = SshClient.setUpDefaultClient().apply {
-                userAuthFactories = listOf(
-                    UserAuthPasswordFactory.INSTANCE,
-                    UserAuthKeyboardInteractiveFactory.INSTANCE,
-                )
-                keyIdentityProvider = KeyIdentityProvider.EMPTY_KEYS_PROVIDER
-
-                if (connection.password.isNotEmpty()) {
-                    passwordIdentityProvider = PasswordIdentityProvider.wrapPasswords(connection.password)
-                    userInteraction = PasswordUserInteraction(connection.password)
-                }
-            }
-            client.start()
-
-            sess = client.connect(
-                connection.username,
-                connection.host,
-                connection.port,
-            ).verify(CONNECTION_TIMEOUT_SECONDS, TimeUnit.SECONDS).session
-
             if (connection.password.isNotEmpty()) {
-                sess.addPasswordIdentity(connection.password)
+                nextSession.setPassword(connection.password.toByteArray())
             }
-
-            sess.auth().verify(CONNECTION_TIMEOUT_SECONDS, TimeUnit.SECONDS)
-            sftp = SftpClientFactory.instance().createSftpClient(sess)
-
-            sshClient = client
-            session = sess
-            sftpClient = sftp
-            return@withLock sftp
+            nextSession.userInfo = PasswordUserInfo(connection.password)
+            nextSession.setConfig(
+                Properties().apply {
+                    put("StrictHostKeyChecking", "no")
+                    put("PreferredAuthentications", "password,keyboard-interactive")
+                }
+            )
+            nextSession.setTimeout(CONNECTION_TIMEOUT_MILLIS)
+            nextSession.setServerAliveInterval(SERVER_ALIVE_INTERVAL_MILLIS)
+            nextSession.setServerAliveCountMax(SERVER_ALIVE_COUNT_MAX)
+            nextSession.connect(CONNECTION_TIMEOUT_MILLIS)
+            session = nextSession
+            return nextSession
         } catch (error: Throwable) {
-            runCatching { sftp?.close() }
-            runCatching { sess?.close() }
-            runCatching { client?.stop() }
+            runCatching { nextSession.disconnect() }
             throw error
         }
     }
 
+    private fun openSftpChannelLocked(): ChannelSftp {
+        val channel = ensureSessionLocked().openChannel("sftp") as ChannelSftp
+        try {
+            channel.connect(CONNECTION_TIMEOUT_MILLIS)
+            return channel
+        } catch (error: Throwable) {
+            runCatching { channel.disconnect() }
+            throw error
+        }
+    }
+
+    private suspend fun <T> withSftpChannel(block: (ChannelSftp) -> T): T =
+        connectionLock.withLock {
+            val channel = openSftpChannelLocked()
+            try {
+                block(channel)
+            } finally {
+                channel.disconnect()
+            }
+        }
+
     override suspend fun listFiles(path: String): Result<List<FileItem>> =
         withContext(Dispatchers.IO) {
             runCatching {
-                val sftp = ensureConnected()
-                val handle = sftp.openDir(path)
-                try {
-                    val entries = mutableListOf<FileItem>()
-
-                    for (dirEntry in sftp.listDir(handle)) {
-                        val name = dirEntry.filename
-                        if (name == "." || name == "..") continue
-                        val attrs = dirEntry.attributes
-                        entries.add(
-                            FileItem(
-                                name = name,
-                                path = joinPath(path, name),
-                                isDirectory = attrs.isDirectory,
-                                size = attrs.size,
-                                lastModified = Date(attrs.modifyTime.toMillis()),
-                                isHidden = name.startsWith("."),
-                                permissions = attrs.permissions?.toString(),
-                                owner = attrs.owner,
-                                source = FileSource.SFTP,
+                withSftpChannel { sftp ->
+                    listEntries(sftp, path)
+                        .filterNot { it.filename == "." || it.filename == ".." }
+                        .map { entry ->
+                            toFileItem(
+                                name = entry.filename,
+                                path = joinPath(path, entry.filename),
+                                attrs = entry.attrs,
                             )
-                        )
-                    }
-                    entries
-                } finally {
-                    sftp.close(handle)
+                        }
                 }
             }
         }
@@ -115,60 +100,58 @@ class SftpFileProvider(private val connection: RemoteConnection) : FileProvider 
     override suspend fun createDirectory(path: String, name: String): Result<FileItem> =
         withContext(Dispatchers.IO) {
             runCatching {
-                val sftp = ensureConnected()
-                val fullPath = joinPath(path, name)
-                sftp.mkdir(fullPath)
-                FileItem(
-                    name = name, path = fullPath, isDirectory = true,
-                    source = FileSource.SFTP,
-                )
+                withSftpChannel { sftp ->
+                    val fullPath = joinPath(path, name)
+                    sftp.mkdir(fullPath)
+                    FileItem(
+                        name = name,
+                        path = fullPath,
+                        isDirectory = true,
+                        source = FileSource.SFTP,
+                    )
+                }
             }
         }
 
     override suspend fun createFile(path: String, name: String): Result<FileItem> =
         withContext(Dispatchers.IO) {
             runCatching {
-                val sftp = ensureConnected()
-                val fullPath = joinPath(path, name)
-                val handle = sftp.open(
-                    fullPath,
-                    setOf(SftpClient.OpenMode.Write, SftpClient.OpenMode.Create),
-                )
-                sftp.close(handle)
-                FileItem(
-                    name = name, path = fullPath, isDirectory = false,
-                    source = FileSource.SFTP,
-                )
+                withSftpChannel { sftp ->
+                    val fullPath = joinPath(path, name)
+                    sftp.put(fullPath, ChannelSftp.OVERWRITE).use { }
+                    FileItem(
+                        name = name,
+                        path = fullPath,
+                        isDirectory = false,
+                        source = FileSource.SFTP,
+                    )
+                }
             }
         }
 
     override suspend fun delete(path: String): Result<Unit> =
         withContext(Dispatchers.IO) {
             runCatching {
-                val sftp = ensureConnected()
-                val attrs = sftp.stat(path)
-                if (attrs.isDirectory) {
-                    deleteDirectoryRecursive(sftp, path)
-                } else {
-                    sftp.remove(path)
+                withSftpChannel { sftp ->
+                    val attrs = sftp.lstat(path)
+                    if (attrs.isDir) {
+                        deleteDirectoryRecursive(sftp, path)
+                    } else {
+                        sftp.rm(path)
+                    }
                 }
             }
         }
 
-    private fun deleteDirectoryRecursive(sftp: SftpClient, path: String) {
-        val handle = sftp.openDir(path)
-        try {
-            for (entry in sftp.listDir(handle)) {
-                if (entry.filename == "." || entry.filename == "..") continue
-                val entryPath = joinPath(path, entry.filename)
-                if (entry.attributes.isDirectory) {
-                    deleteDirectoryRecursive(sftp, entryPath)
-                } else {
-                    sftp.remove(entryPath)
-                }
+    private fun deleteDirectoryRecursive(sftp: ChannelSftp, path: String) {
+        for (entry in listEntries(sftp, path)) {
+            if (entry.filename == "." || entry.filename == "..") continue
+            val entryPath = joinPath(path, entry.filename)
+            if (entry.attrs.isDir) {
+                deleteDirectoryRecursive(sftp, entryPath)
+            } else {
+                sftp.rm(entryPath)
             }
-        } finally {
-            sftp.close(handle)
         }
         sftp.rmdir(path)
     }
@@ -176,64 +159,72 @@ class SftpFileProvider(private val connection: RemoteConnection) : FileProvider 
     override suspend fun rename(oldPath: String, newName: String): Result<FileItem> =
         withContext(Dispatchers.IO) {
             runCatching {
-                val sftp = ensureConnected()
-                val parent = getParentPath(oldPath) ?: "/"
-                val newPath = joinPath(parent, newName)
-                sftp.rename(oldPath, newPath)
-                val attrs = sftp.stat(newPath)
-                FileItem(
-                    name = newName, path = newPath,
-                    isDirectory = attrs.isDirectory,
-                    size = attrs.size,
-                    lastModified = Date(attrs.modifyTime.toMillis()),
-                    source = FileSource.SFTP,
-                )
+                withSftpChannel { sftp ->
+                    val parent = getParentPath(oldPath) ?: "/"
+                    val newPath = joinPath(parent, newName)
+                    sftp.rename(oldPath, newPath)
+                    toFileItem(
+                        name = newName,
+                        path = newPath,
+                        attrs = sftp.lstat(newPath),
+                    )
+                }
             }
         }
 
     override suspend fun copy(sourcePath: String, destPath: String): Result<Unit> =
         withContext(Dispatchers.IO) {
             runCatching {
-                val sftp = ensureConnected()
-                val name = sourcePath.substringAfterLast("/")
-                copyPath(sftp, sourcePath, joinPath(destPath, name))
+                withSftpChannel { sftp ->
+                    val name = sourcePath.substringAfterLast("/")
+                    copyPath(sftp, sourcePath, joinPath(destPath, name))
+                }
             }
         }
 
     override suspend fun move(sourcePath: String, destPath: String): Result<Unit> =
         withContext(Dispatchers.IO) {
             runCatching {
-                val sftp = ensureConnected()
-                val name = sourcePath.substringAfterLast("/")
-                sftp.rename(sourcePath, joinPath(destPath, name))
+                withSftpChannel { sftp ->
+                    val name = sourcePath.substringAfterLast("/")
+                    sftp.rename(sourcePath, joinPath(destPath, name))
+                }
             }
         }
 
     override suspend fun getInputStream(path: String): Result<InputStream> =
         withContext(Dispatchers.IO) {
             runCatching {
-                val sftp = ensureConnected()
-                val handle = sftp.open(path, setOf(SftpClient.OpenMode.Read))
-                SftpInputStream(sftp, handle) as InputStream
+                val channel = connectionLock.withLock { openSftpChannelLocked() }
+                try {
+                    SftpChannelInputStream(channel, channel.get(path)) as InputStream
+                } catch (error: Throwable) {
+                    runCatching { channel.disconnect() }
+                    throw error
+                }
             }
         }
 
     override suspend fun getOutputStream(path: String): Result<OutputStream> =
         withContext(Dispatchers.IO) {
             runCatching {
-                val sftp = ensureConnected()
-                val handle = sftp.open(
-                    path,
-                    setOf(SftpClient.OpenMode.Write, SftpClient.OpenMode.Create, SftpClient.OpenMode.Truncate),
-                )
-                SftpOutputStream(sftp, handle) as OutputStream
+                val channel = connectionLock.withLock { openSftpChannelLocked() }
+                try {
+                    SftpChannelOutputStream(
+                        channel = channel,
+                        output = channel.put(path, ChannelSftp.OVERWRITE),
+                    ) as OutputStream
+                } catch (error: Throwable) {
+                    runCatching { channel.disconnect() }
+                    throw error
+                }
             }
         }
 
     override suspend fun exists(path: String): Boolean =
         withContext(Dispatchers.IO) {
             try {
-                ensureConnected().stat(path)
+                withSftpChannel { it.lstat(path) }
                 true
             } catch (_: Exception) {
                 false
@@ -243,15 +234,13 @@ class SftpFileProvider(private val connection: RemoteConnection) : FileProvider 
     override suspend fun getFileInfo(path: String): Result<FileItem> =
         withContext(Dispatchers.IO) {
             runCatching {
-                val attrs = ensureConnected().stat(path)
-                FileItem(
-                    name = path.removeSuffix("/").substringAfterLast("/").ifEmpty { "/" },
-                    path = path,
-                    isDirectory = attrs.isDirectory,
-                    size = attrs.size,
-                    lastModified = Date(attrs.modifyTime.toMillis()),
-                    source = FileSource.SFTP,
-                )
+                withSftpChannel { sftp ->
+                    toFileItem(
+                        name = path.removeSuffix("/").substringAfterLast("/").ifEmpty { "/" },
+                        path = path,
+                        attrs = sftp.lstat(path),
+                    )
+                }
             }
         }
 
@@ -269,137 +258,110 @@ class SftpFileProvider(private val connection: RemoteConnection) : FileProvider 
         }
     }
 
-    private fun copyPath(sftp: SftpClient, sourcePath: String, targetPath: String) {
-        val attrs = sftp.stat(sourcePath)
-        if (attrs.isDirectory) {
+    private fun copyPath(sftp: ChannelSftp, sourcePath: String, targetPath: String) {
+        val attrs = sftp.lstat(sourcePath)
+        if (attrs.isDir) {
             sftp.mkdir(targetPath)
-            val handle = sftp.openDir(sourcePath)
-            try {
-                for (entry in sftp.listDir(handle)) {
-                    if (entry.filename == "." || entry.filename == "..") continue
-                    copyPath(
-                        sftp,
-                        joinPath(sourcePath, entry.filename),
-                        joinPath(targetPath, entry.filename),
-                    )
-                }
-            } finally {
-                sftp.close(handle)
+            for (entry in listEntries(sftp, sourcePath)) {
+                if (entry.filename == "." || entry.filename == "..") continue
+                copyPath(
+                    sftp,
+                    joinPath(sourcePath, entry.filename),
+                    joinPath(targetPath, entry.filename),
+                )
             }
             return
         }
 
-        val inputHandle = sftp.open(sourcePath, setOf(SftpClient.OpenMode.Read))
+        val outputChannel = openSftpChannelLocked()
         try {
-            val outputHandle = sftp.open(
-                targetPath,
-                setOf(SftpClient.OpenMode.Write, SftpClient.OpenMode.Create, SftpClient.OpenMode.Truncate),
-            )
-            try {
-                val buffer = ByteArray(BUFFER_SIZE)
-                var readOffset = 0L
-                var writeOffset = 0L
-                while (true) {
-                    val read = sftp.read(inputHandle, readOffset, buffer, 0, buffer.size)
-                    if (read <= 0) break
-                    sftp.write(outputHandle, writeOffset, buffer, 0, read)
-                    readOffset += read
-                    writeOffset += read
+            sftp.get(sourcePath).use { input ->
+                outputChannel.put(targetPath, ChannelSftp.OVERWRITE).use { output ->
+                    input.copyTo(output, BUFFER_SIZE)
                 }
-            } finally {
-                sftp.close(outputHandle)
             }
         } finally {
-            sftp.close(inputHandle)
+            outputChannel.disconnect()
         }
     }
 
     private fun closeConnection() {
-        runCatching { sftpClient?.close() }
-        runCatching { session?.close() }
-        runCatching { sshClient?.stop() }
-        sftpClient = null
+        runCatching { session?.disconnect() }
         session = null
-        sshClient = null
     }
 
-    private class PasswordUserInteraction(private val password: String) : UserInteraction {
-        override fun isInteractionAllowed(session: ClientSession): Boolean = password.isNotEmpty()
+    private fun listEntries(sftp: ChannelSftp, path: String): List<ChannelSftp.LsEntry> =
+        sftp.ls(path).filterIsInstance<ChannelSftp.LsEntry>()
 
-        override fun interactive(
-            session: ClientSession,
-            name: String,
-            instruction: String,
-            lang: String,
-            prompt: Array<String>,
-            echo: BooleanArray,
-        ): Array<String> = Array(prompt.size) { password }
+    private fun toFileItem(
+        name: String,
+        path: String,
+        attrs: com.jcraft.jsch.SftpATTRS,
+    ): FileItem =
+        FileItem(
+            name = name,
+            path = path,
+            isDirectory = attrs.isDir,
+            size = attrs.size,
+            lastModified = Date(attrs.mTime.toLong() * 1000L),
+            isHidden = name.startsWith("."),
+            permissions = attrs.permissionsString,
+            owner = attrs.uId.toString(),
+            source = FileSource.SFTP,
+        )
 
-        override fun getUpdatedPassword(
-            session: ClientSession,
-            prompt: String,
-            lang: String,
-        ): String = password
+    private class PasswordUserInfo(private val password: String) : UserInfo, UIKeyboardInteractive {
+        override fun getPassword(): String? = password
+
+        override fun promptPassword(message: String?): Boolean = password.isNotEmpty()
+
+        override fun getPassphrase(): String? = null
+
+        override fun promptPassphrase(message: String?): Boolean = false
+
+        override fun promptYesNo(message: String?): Boolean = true
+
+        override fun showMessage(message: String?) = Unit
+
+        override fun promptKeyboardInteractive(
+            destination: String?,
+            name: String?,
+            instruction: String?,
+            prompt: Array<out String>?,
+            echo: BooleanArray?,
+        ): Array<String> = Array(prompt?.size ?: 0) { password }
     }
 
-    private class SftpInputStream(
-        private val sftp: SftpClient,
-        private val handle: SftpClient.Handle,
-    ) : InputStream() {
-        private val singleByte = ByteArray(1)
-        private var offset = 0L
-        private var closed = false
-
-        override fun read(): Int {
-            val read = read(singleByte, 0, 1)
-            return if (read == -1) -1 else singleByte[0].toInt() and 0xff
-        }
-
-        override fun read(buffer: ByteArray, off: Int, len: Int): Int {
-            check(!closed) { "Stream is closed" }
-            if (len == 0) return 0
-            val read = sftp.read(handle, offset, buffer, off, len)
-            if (read <= 0) return -1
-            offset += read
-            return read
-        }
-
+    private class SftpChannelInputStream(
+        private val channel: ChannelSftp,
+        input: InputStream,
+    ) : FilterInputStream(input) {
         override fun close() {
-            if (closed) return
-            closed = true
-            sftp.close(handle)
+            try {
+                super.close()
+            } finally {
+                channel.disconnect()
+            }
         }
     }
 
-    private class SftpOutputStream(
-        private val sftp: SftpClient,
-        private val handle: SftpClient.Handle,
-    ) : OutputStream() {
-        private val singleByte = ByteArray(1)
-        private var offset = 0L
-        private var closed = false
-
-        override fun write(value: Int) {
-            singleByte[0] = value.toByte()
-            write(singleByte, 0, 1)
-        }
-
-        override fun write(buffer: ByteArray, off: Int, len: Int) {
-            check(!closed) { "Stream is closed" }
-            if (len == 0) return
-            sftp.write(handle, offset, buffer, off, len)
-            offset += len
-        }
-
+    private class SftpChannelOutputStream(
+        private val channel: ChannelSftp,
+        output: OutputStream,
+    ) : FilterOutputStream(output) {
         override fun close() {
-            if (closed) return
-            closed = true
-            sftp.close(handle)
+            try {
+                super.close()
+            } finally {
+                channel.disconnect()
+            }
         }
     }
 
     private companion object {
-        const val CONNECTION_TIMEOUT_SECONDS = 30L
+        const val CONNECTION_TIMEOUT_MILLIS = 30_000
+        const val SERVER_ALIVE_INTERVAL_MILLIS = 15_000
+        const val SERVER_ALIVE_COUNT_MAX = 2
         const val BUFFER_SIZE = 32 * 1024
 
         fun joinPath(parent: String, child: String): String = when {

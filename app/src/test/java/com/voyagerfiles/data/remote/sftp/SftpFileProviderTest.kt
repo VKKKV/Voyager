@@ -72,6 +72,58 @@ class SftpFileProviderTest {
         assertEquals("uploaded", String(Files.readAllBytes(server.root.resolve("uploaded.txt"))))
     }
 
+    @Test
+    fun inputStreamDownloadsFile() = runBlocking {
+        val server = startServer(AuthMode.PASSWORD)
+        Files.write(server.root.resolve("download.txt"), "downloaded".toByteArray())
+        val provider = createProvider(server.port)
+
+        val contents = provider.getInputStream("/download.txt").getOrThrow().use { stream ->
+            stream.readBytes()
+        }
+
+        assertEquals("downloaded", String(contents))
+    }
+
+    @Test
+    fun copyDirectoryRecursively() = runBlocking {
+        val server = startServer(AuthMode.PASSWORD)
+        Files.createDirectories(server.root.resolve("source/nested"))
+        Files.write(server.root.resolve("source/nested/file.txt"), "copied".toByteArray())
+        Files.createDirectory(server.root.resolve("target"))
+        val provider = createProvider(server.port)
+
+        provider.copy("/source", "/target").getOrThrow()
+
+        assertEquals("copied", String(Files.readAllBytes(server.root.resolve("target/source/nested/file.txt"))))
+    }
+
+    @Test
+    fun deleteDirectoryRecursively() = runBlocking {
+        val server = startServer(AuthMode.PASSWORD)
+        Files.createDirectories(server.root.resolve("folder/nested"))
+        Files.write(server.root.resolve("folder/nested/file.txt"), "delete".toByteArray())
+        val provider = createProvider(server.port)
+
+        provider.delete("/folder").getOrThrow()
+
+        assertTrue(Files.notExists(server.root.resolve("folder")))
+    }
+
+    @Test
+    fun renameFileReturnsUpdatedInfo() = runBlocking {
+        val server = startServer(AuthMode.PASSWORD)
+        Files.write(server.root.resolve("old.txt"), "renamed".toByteArray())
+        val provider = createProvider(server.port)
+
+        val renamed = provider.rename("/old.txt", "new.txt").getOrThrow()
+
+        assertEquals("new.txt", renamed.name)
+        assertEquals("/new.txt", renamed.path)
+        assertTrue(Files.notExists(server.root.resolve("old.txt")))
+        assertTrue(Files.exists(server.root.resolve("new.txt")))
+    }
+
     private fun createProvider(port: Int): SftpFileProvider {
         val provider = SftpFileProvider(
             RemoteConnection(
