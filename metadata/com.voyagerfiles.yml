@@ -23,8 +23,7 @@ Builds:
     gradleprops:
       - voyager.enableAbiSplits=false
 
-AllowedAPKSigningKeys: 
-  db496277d456751abe8ca6405026337c81a561a134e38d49c8e21fb8f036badf
+AllowedAPKSigningKeys: db496277d456751abe8ca6405026337c81a561a134e38d49c8e21fb8f036badf
 
 AutoUpdateMode: Version
 UpdateCheckMode: Tags
