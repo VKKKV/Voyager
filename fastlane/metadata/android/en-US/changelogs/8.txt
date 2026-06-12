@@ -1,0 +1,6 @@
+Release 1.1.3:
+- Fixed copying local files into SFTP and WebDAV directories, which previously failed with "items failed to paste"
+- Cross-provider copy and paste now stream files between local storage and SFTP, FTP, SMB, and WebDAV in both directions
+- Added SFTP private key authentication with an optional key path in the connection dialog
+- Listed mounted external storage volumes, such as SD cards and USB/OTG, on Home alongside internal storage
+- Reworked the browser header in portrait so the path has its own row and the remote Disconnect action moved into the overflow menu
