@@ -112,14 +112,6 @@ jobs:
       - name: Prepare GitHub Pages release site
         run: scripts/prepare-github-pages-release.sh "${{ steps.release.outputs.tag }}" app/build/outputs/apk/release public
 
-      - name: Upload signed APK artifact
-        uses: actions/upload-artifact@v7
-        with:
-          name: voyager-${{ steps.release.outputs.tag }}-signed-apks
-          path: public/downloads/
-          if-no-files-found: error
-          retention-days: 3
-
       - name: Publish GitHub Release assets
         env:
           GH_TOKEN: ${{ github.token }}
